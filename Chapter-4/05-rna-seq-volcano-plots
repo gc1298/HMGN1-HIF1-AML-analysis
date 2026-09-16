@@ -1,0 +1,170 @@
+library(readxl)
+library(EnhancedVolcano)
+library(ggplot2)
+
+# Translate ChIP-seq list into Ensembl IDs
+raw_thp1_chip <- c(
+  "SMAP2", "TRIT1", "ANKRD37", "SCIRT", "PDK1-AS1", "ZFP69B", "LOC105372924", 
+  "MTFP1", "SNAPC3", "CISD2", "DARS1-AS1", "RHBDF2", "PDC-AS1", "EFNA4-EFNA3", 
+  "PPT1", "FHAD1", "GAPDH-DT", "NEK7", "GBE1", "DDIT4-AS1", "ZNF395", "FAM210A", 
+  "CTDSP1", "LOC101930053", "RSRC2", "LOC124900967", "BEND5", "SCARB1", "CDKN1A", 
+  "MIR4522", "RDH11", "CBX8", "LINC01702", "VDAC1", "TSNAX-DISC1", "TEX44", 
+  "TNIP1", "LINC01714", "GUK1", "PLXDC2", "TBC1D30", "ZNF432", "LONP1", "PLIN2", 
+  "LINC01816", "ZNF398", "MCMBP", "HIF1A-AS1", "DHRS3", "LOC124902208", 
+  "LOC105375855", "ARMC9", "VDAC2", "IRF2BP2", "NAT10", "CYC1", "KCNAB2", 
+  "RNF111", "LINC03106", "KDM3A", "KDM4B", "ACOT6", "LOC107986901", "NSUN4", 
+  "KIAA2013", "SFMBT2", "GPI", "MIR424", "RPF2", "LINC01088", "EXOC3-AS1", 
+  "LOC102724945", "LINC00607", "LOC124900444", "TFAP4", "HK2-DT", "LOC105377448", 
+  "PPP5D1P", "LOC124908011", "OPA3", "LINC01792", "MIF", "LOC102723635", 
+  "BCL6-AS1", "ZNF160", "RPS6KA1", "LOC124900819", "MIR1910", "GEMIN8", "CXCR4", 
+  "LOC105375943", "LOC105376481", "MXI1", "THUMPD3", "LINC02649", "MED29", 
+  "ZNHIT1", "SNX29P2", "LINC01686", "MEPE", "NARF-AS2", "NEK6", "AHRR", "P4HA2", 
+  "NCKIPSD", "LRATD1", "AIG1", "PFKFB4", "LOC101928234", "TSPAN14-AS1", "EGLN1", 
+  "PGK1", "CEP85L", "LOC105378879", "MPI", "SYNPR-AS1", "SNAI1", "RCBTB2", 
+  "ZNF670", "LINC01269", "UBE2R2", "PKM", "ALDOA", "PNRC1", "RNF213", "MAGOHB", 
+  "PSMA1", "FRYL", "MARCHF6-DT", "KLHL36", "NSUN6", "GINS4", "MATK", "SHC3", 
+  "PPP1R3G", "ASPRV1", "WT1", "ZHX2", "RLF", "LOC105379135", "LOC105379244", 
+  "LOC101927245", "ATP6AP1L", "SULT1E1", "FKBP1C", "PMS2P3", "LOC124903218", 
+  "SAMD3", "FAM162A", "FGGY", "LHX5-AS1", "MIR378G", "LOC105377002", "TMEM127", 
+  "ATG7", "RRP12", "SAMTOR", "LINC02013", "LOC105376208", "BACH1", "SAMHD1", 
+  "NAMPT", "TSEN2", "PITPNM2-AS1", "THAP8", "CAMK2D", "LOC105375937", "TPM1", 
+  "CD70", "PPM1H", "LOC105375075", "NXPH1", "RAB8B", "LINC03108", "PEBP4", 
+  "SULF2", "RAPGEF6", "TRIM36", "GAPVD1", "LOC105377845", "SYT15B", "GNG4", 
+  "LOC124901456", "IQCM", "LOC105370364", "TLE1-DT", "TDRD6", "FCGR2B", "NTSR1", 
+  "TPI1", "CAP1", "LOC107984750", "VGLL4", "ZNF654", "FAM174B", "OXR1", "LINC02549"
+)
+
+raw_kasumi_chip <- c(
+  "ENO1", "VGLL4", "ANKRD37", "LINC01088", "ZNF292", "PGK1", "BNIP3L", "NARF-AS2", 
+  "KIAA2013", "LDHA", "RRP12", "SLC16A3", "KDM4B", "BNIP3", "PFKFB4", "DARS1-AS1", 
+  "PFKFB3-AS1", "PCAT6", "PDK1", "KDM3A", "RLF", "HIF1A-AS1", "KMT2E-AS1", "GBE1", 
+  "PNRC1", "SLC2A1", "AK4", "LOC107984428", "MIF", "IFNAR1", "TET3", "LINC01792", 
+  "GYPC", "DNAJB12", "HSPG2", "EFNA4-EFNA3", "ZNF654", "CISD2", "RBM33", "KCNAB2", 
+  "ZFAT", "MIR1910", "PFKP", "PPP1R3E", "KDM6B", "HS6ST1", "PPFIA3", "HDHD5-AS1", 
+  "P4HA2", "PSMA1", "COX20", "CIART", "JUN", "ERVE-5", "YEATS2", "SFXN1", "PHF19", 
+  "CAND1.11", "DENND5A", "GNA15", "ZMIZ1", "SAMTOR", "NREP", "NFXL1", "SULF2", 
+  "ADRA1D", "TTC3P1", "TET2", "TBC1D22A", "PTGES3", "LIX1L-AS1", "MATN2", "PTAFR", 
+  "NRN1", "PKM", "IRF2BP2", "DTWD2", "IBA57", "PRSS1", "LOC124902188", 
+  "GTF2IRD2B", "R3HCC1L", "TENT4A", "TPI1", "KDM4C", "TXLNA", "PDE11A", "MXI1", 
+  "MBD3", "NCOR2", "HELZ-AS1"
+)
+
+# Define the file path to your Excel workbook
+excel_file <- "Differential_Expression_Results_Workbook_OG.xlsx"
+
+# ==========================================
+# CUSTOM VOLCANO PLOT FUNCTION
+# ==========================================
+generate_custom_volcano <- function(data_frame, title_text, chip_targets, top_n = 3) {
+  
+  # Remove rows containing NA values in our primary metrics
+  plot_data <- data_frame[!is.na(data_frame$padj) & !is.na(data_frame$log2FoldChange), ]
+  
+  # Map standard colors based entirely on statistical significance (FDR < 0.05)
+  key_colors <- rep('grey', nrow(plot_data))
+  names(key_colors) <- rep('NS', nrow(plot_data))
+  
+  up_regulated <- plot_data$log2FoldChange > 0 & plot_data$padj < 0.05
+  key_colors[up_regulated] <- 'red'
+  names(key_colors)[up_regulated] <- 'Upregulated'
+  
+  down_regulated <- plot_data$log2FoldChange < 0 & plot_data$padj < 0.05
+  key_colors[down_regulated] <- 'blue'
+  names(key_colors)[down_regulated] <- 'Downregulated'
+  
+  # --- STRICT LABEL SELECTION ---
+  # 1. Clean up decimal versions from workbook names just for matching safety
+  clean_rna_symbols <- sub("\\..*", "", plot_data$Gene_Symbol)
+  
+  # 2. Match only if it passed the FDR threshold AND is found in the raw target list
+  significant_mask <- plot_data$padj < 0.05
+  matching_mask    <- clean_rna_symbols %in% chip_targets
+  
+  # Isolate all valid significant ChIP targets first
+  targets_df <- plot_data[significant_mask & matching_mask, ]
+  
+  if (!is.null(top_n) && nrow(targets_df) > 0) {
+    # Extract Top Upregulated by highest Log2FC magnitude
+    up_targets <- targets_df[targets_df$log2FoldChange > 0, ]
+    top_up <- if(nrow(up_targets) > 0) head(up_targets$Gene_Symbol[order(-up_targets$log2FoldChange)], top_n) else c()
+    
+    # Extract Top Downregulated by lowest (most negative) Log2FC magnitude
+    down_targets <- targets_df[targets_df$log2FoldChange < 0, ]
+    top_down <- if(nrow(down_targets) > 0) head(down_targets$Gene_Symbol[order(down_targets$log2FoldChange)], top_n) else c()
+    
+    genes_to_label <- c(top_up, top_down)
+  } else {
+    genes_to_label <- targets_df$Gene_Symbol
+  }
+  
+  hmgn1_match <- plot_data$Gene_Symbol[clean_rna_symbols == "HMGN1"]
+  if (length(hmgn1_match) > 0) {
+    genes_to_label <- unique(c(genes_to_label, hmgn1_match))
+  }
+  
+  if (length(genes_to_label) == 0) {
+    genes_to_label <- NULL
+  }
+  
+  # Render the plot layout
+  p <- EnhancedVolcano(plot_data,
+                       lab = plot_data$Gene_Symbol,
+                       x = 'log2FoldChange',
+                       y = 'padj',
+                       pCutoff = 0.05,                   
+                       FCcutoff = 0,                     
+                       xlim = c(-10, 10),                
+                       title = title_text,
+                       subtitle = NULL,
+                       caption = NULL,
+                       xlab = bquote(~Log[2]~ 'FC'),
+                       ylab = bquote(~-Log[10]~ 'FDR'),
+                       colCustom = key_colors,
+                       colAlpha = 0.5,                   
+                       pointSize = 2.0,
+                       cutoffLineType = 'dashed',
+                       cutoffLineWidth = 0.5,
+                       
+                       # --- LABEL CONTROLS & CONNECTOR LINES ---
+                       selectLab = genes_to_label,       
+                       labSize = 3.5,                     
+                       drawConnectors = TRUE,            
+                       widthConnectors = 0.5,            
+                       colConnectors = 'black',          
+                       arrowheads = FALSE,
+                       max.overlaps = Inf)
+  return(p)
+}
+
+# ==========================================
+# LOAD DATA AND RUN FOR THE 4 EXPERIMENTS
+# ==========================================
+
+# --- Process THP1 Data ---
+df_thp1_2 <- read_excel(excel_file, sheet = "THP1_KD_vs_Ctrl_Hypox")
+plot_thp1_2 <- generate_custom_volcano(df_thp1_2, "THP-1: HMGN1 Ctrl Hypoxia vs HMGN1 KD Hypoxia", raw_thp1_chip)
+
+# --- Process Kasumi1 Data ---
+df_kasumi1_2 <- read_excel(excel_file, sheet = "Kasumi1_KD_vs_Ctrl_Hypox")
+plot_kasumi1_2 <- generate_custom_volcano(df_kasumi1_2, "Kasumi-1: HMGN1 Ctrl Hypoxia vs HMGN1 KD Hypoxia", raw_kasumi_chip)
+
+# ==========================================
+# SAVE YOUR PLOTS
+# ==========================================
+# Create a list of our plots and their matching file names
+plots_to_save <- list(
+  "Volcano_THP1_KD_vs_Ctrl_Hypoxia_v6.png"  = plot_thp1_2,
+  "Volcano_Kasumi1_KD_vs_Ctrl_Hypoxia_v6.png"  = plot_kasumi1_2
+)
+
+# Loop through and save each plot with publication-quality dimensions
+for (file_name in names(plots_to_save)) {
+  ggsave(
+    filename = file_name,
+    plot = plots_to_save[[file_name]],
+    width = 9,        
+    height = 8,       
+    dpi = 300,        
+    bg = "white"        
+  )
+}
