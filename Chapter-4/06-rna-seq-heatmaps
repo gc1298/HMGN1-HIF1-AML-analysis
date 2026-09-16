@@ -1,0 +1,310 @@
+# ==============================================================================
+# RNA-SEQ HEATMAP SCRIPT - HYPOXIA + CHIP-SEQ TARGETS
+# ==============================================================================
+
+library(DESeq2)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(RColorBrewer)
+
+# ==========================================
+# 1. LOAD DATA
+# ==========================================
+
+counts_data <- read.delim("rsem.merged.gene_counts.tsv", row.names = 1, check.names = FALSE)
+counts_data <- counts_data[, !colnames(counts_data) %in% c("transcript_id(s)")]
+counts_data <- round(counts_data)
+
+# ==========================================
+# 2. CREATE METADATA SETUP
+# ==========================================
+sample_names <- colnames(counts_data)
+
+cell_line <- rep(NA, length(sample_names))
+condition <- rep(NA, length(sample_names))
+
+cell_line[grep("THP-1", sample_names)]    <- "THP1"
+cell_line[grep("Kasumi-1", sample_names)] <- "Kasumi1"
+
+condition[grep("norm", sample_names)]    <- "HMGN1 Ctrl normoxia"
+condition[grep("DOXhyp", sample_names)] <- "HMGN1 KD hypoxia"
+condition[grep("(?<!DOX)hyp", sample_names, perl = TRUE)] <- "HMGN1 Ctrl hypoxia"
+
+group <- paste(cell_line, condition, sep = "_")
+
+col_data <- data.frame(
+  cell_line = factor(cell_line),
+  condition = factor(condition),
+  group = factor(group),
+  row.names = sample_names
+)
+
+# ==========================================
+# 3. RUN DESEQ2 & TRANSFORM DATA
+# ==========================================
+
+dds <- DESeqDataSetFromMatrix(countData = counts_data, colData = col_data, design = ~ group)
+keep <- rowSums(counts(dds) >= 10) >= 4
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+
+vsd <- vst(dds, blind = FALSE)
+vsd_matrix <- assay(vsd)
+
+# ==========================================
+# 4. TRANSLATE DATASET AT THE SOURCE
+# ==========================================
+clean_ensembl_all <- gsub("\\..*$", "", rownames(dds))
+gene_symbols_all <- mapIds(org.Hs.eg.db, keys = clean_ensembl_all, 
+                           column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+
+# FALLBACK: If no symbol exists, keep the original Ensembl ID!
+final_names <- ifelse(is.na(gene_symbols_all), rownames(dds), gene_symbols_all)
+final_names <- make.unique(final_names)
+
+# Assign these clean labels onto our data structures
+rownames(dds) <- final_names
+rownames(vsd_matrix) <- final_names
+
+# ==========================================
+# 5. EXTRACT NEW CONTRASTS
+# ==========================================
+group_levels <- levels(dds$group)
+
+thp1_norm   <- group_levels[grep("THP1.*Ctrl.*norm", group_levels)]
+thp1_hyp    <- group_levels[grep("THP1.*Ctrl.*hyp", group_levels)]
+thp1_kd     <- group_levels[grep("THP1.*KD.*hyp", group_levels)]
+
+kasumi_norm <- group_levels[grep("Kasumi1.*Ctrl.*norm", group_levels)]
+kasumi_hyp  <- group_levels[grep("Kasumi1.*Ctrl.*hyp", group_levels)]
+kasumi_kd   <- group_levels[grep("Kasumi1.*KD.*hyp", group_levels)]
+
+# Contrasts of interest for HMGN1 KD effects in hypoxia
+res_THP1_kd_vs_ctrl_hyp    <- results(dds, contrast = c("group", thp1_kd, thp1_hyp))
+res_Kasumi1_kd_vs_ctrl_hyp <- results(dds, contrast = c("group", kasumi_kd, kasumi_hyp))
+
+# ==============================================================================
+# 6. TARGET GENE LISTS (HALLMARK & CHIP-SEQ)
+# ==============================================================================
+hallmark_hypoxia_genes <- c(
+  "ADM", "ADORA2B", "AK4", "AKAP12", "ALDOA", "ALDOB", "ALDOC", "AMPD3", 
+  "ANGPTL4", "ANKZF1", "ANXA2", "ATF3", "ATP7A", "B3GALT6", "B4GALNT2", 
+  "BCAN", "BCL2", "BGN", "BHLHE40", "BNIP3L", "BRS3", "BTG1", "CA12", 
+  "CASP6", "CAV1", "CCNG2", "NOCT", "CDKN1A", "CDKN1B", "CDKN1C", "CHST2", 
+  "CHST3", "CITED2", "COL5A1", "CP", "CSRP2", "CCN2", "CXCR4", "ACKR3", 
+  "CCN1", "DCN", "DDIT3", "DDIT4", "DPYSL4", "DTNA", "DUSP1", "EDN2", 
+  "EFNA1", "EFNA3", "EGFR", "ENO1", "ENO2", "ENO3", "ERO1A", "ERRFI1", 
+  "ETS1", "EXT1", "F3", "FAM162A", "FBP1", "FOS", "FOSL2", "FOXO3", "GAA", 
+  "GALK1", "GAPDH", "GAPDHS", "GBE1", "GCK", "GCNT2", "GLRX", "GPC1", 
+  "GPC3", "GPC4", "GPI", "GRHPR", "GYS1", "HAS1", "HDLBP", "HEXA", "HK1", 
+  "HK2", "HMOX1", "HOXB9", "HS3ST1", "HSPA5", "IDS", "IER3", "IGFBP1", 
+  "IGFBP3", "IL6", "ILVBL", "INHA", "IRS2", "ISG20", "JMJD6", "JUN", 
+  "KDELR3", "KDM3A", "KIF5A", "KLF6", "KLF7", "KLHL24", "LALBA", "LARGE1", 
+  "LDHA", "LDHC", "LOX", "LXN", "MAFF", "MAP3K1", "MIF", "MT1E", "MT2A", 
+  "MXI1", "MYH9", "NAGK", "NCAN", "NDRG1", "NDST1", "NDST2", "NEDD4L", 
+  "NFIL3", "NR3C1", "P4HA1", "P4HA2", "PAM", "PCK1", "PDGFB", "PDK1", 
+  "PDK3", "PFKFB3", "PFKL", "PFKP", "PGAM2", "PGF", "PGK1", "PGM1", 
+  "PGM2", "PHKG1", "PIM1", "PLK1", "PKP1", "PLAC8", "PLAUR", "PLIN2", 
+  "PNRC1", "PPARGC1A", "PPFIA4", "PPP1R15A", "PPP1R3C", "PRDX5", "PRKCA", 
+  "CAVIN3", "CAVIN1", "PYGM", "RBPJ", "RORA", "RRAGD", "S100A4", "SAP30", 
+  "SCARB1", "SDC2", "SDC3", "SDC4", "SELENBP1", "SERPINE1", "SIAH2", 
+  "SLC25A1", "SLC2A1", "SLC2A3", "SLC2A5", "SLC37A4", "SLC6A6", "SRPX", 
+  "STBD1", "STC1", "STC2", "SULT2B1", "TES", "TGFB3", "TGFBI", "TGM2", 
+  "TIPARP", "TKTL1", "TMEM45A", "TNFAIP3", "TPBG", "TPD52", "TPI1", 
+  "TPST2", "UGP2", "VEGFA", "VHL", "VLDLR", "WSB1", "XPNPEP1", "ZFP36", 
+  "ZNF292"
+)
+
+thp1_chip_genes <- c(
+  "SMAP2", "RLF", "TRIT1", "CD70", "TSPAN14", "RRP12", "PPM1H", "SCIRT", 
+  "VGLL4", "ZFP69B", "PNRC1", "PDK1-AS1", "SNAPC3", "AIG1", "MTFP1", "KIAA2013", 
+  "KDM3A", "PPP1R3G", "AHRR", "ZNF160", "RAPGEF6", "CEP85L", "GBE1", "GPI", 
+  "GUK1", "PKM", "RHBDF2", "PDC-AS1", "GAPDH-DT", "FHAD1", "IRF2BP2", "PLIN2", 
+  "SAMD3", "MIR1910", "PPT1", "LRATD1", "NEK7", "KDM4B", "ZNF395", "CTDSP1", 
+  "MEPE", "ZNF670", "RSRC2", "PFKFB4", "CXCR4", "SCARB1", "ANKRD37", "CBX8", 
+  "DDIT4-AS1", "RDH11", "NARF-AS2", "BEND5", "CDKN1A", "KCNAB2", "TNIP1", "SNX29P2", 
+  "SYNPR-AS", "NXPH1", "FAM210A", "SULT1E1", "SULF2", "TEX44", "PLXDC2", "ZNF432", 
+  "TSNAX-DIS", "NSUN6", "MIR4522", "CYC1", "MCMBP", "ZNF398", "HIF1A-AS1", "ARMC9", 
+  "DHRS3", "PSMA1", "VDAC1", "LONP1", "ZNF654", "NAT10", "NSUN4", "RNF213", 
+  "TBC1D30", "MIF", "ZNHIT1", "ATP6AP1L", "RNF111", "VDAC2", "EGLN1", "P4HA2", 
+  "DARS1-AS", "FAM174B", "SAMTOR", "CISD2", "TPI1", "MIR424", "SFMBT2", "PPP5D1P", 
+  "NEK6", "TFAP4", "CAMK2D", "SHC3", "MPI", "HK2-DT", "MAGOHB", "TSEN2", 
+  "ACOT6", "RPF2", "RCBTB2", "MXI1", "THUMPD3", "KLHL36", "MED29", "UBE2R2", 
+  "FRYL", "EXOC3-AS1", "EFNA4-EFNA3", "BCL6-AS1", "MARCHF6-DT", "NCKIPD", "GNG4", 
+  "FAM162A", "ZHX2", "NAMPT", "MATK", "IQCM", "BACH1", "RPS6KA1", "FKBP1C", 
+  "SNAI1", "WT1", "OPA3", "GINS4", "SAMHD1", "TMEM127", "RAB8B", "TRIM36", 
+  "PITPNM2-AS1", "SYT15B", "PGK1", "GEMIN8", "MIR378G", "ATG7", "FGGY", "TDRD6", 
+  "LHX5-AS1", "PEBP4", "GAPVD1", "THAP8", "ASPRV1", "TPM1", "PMS2P3", "TLE1-DT", 
+  "CAP1", "FCGR2B", "ALDOA", "NTSR1", "OXR1", "PLCG2"
+)
+
+kasumi_chip_genes <- c(
+  "ENO1", "VGLL4", "ANKRD37", "LINC01088", "ZNF292", "PGK1", "BNIP3L", "NARF-AS2", 
+  "KIAA2013", "LDHA", "RRP12", "SLC16A3", "KDM4B", "BNIP3", "PFKFB4", "DARS1-AS", 
+  "PFKFB3-AS1", "PCAT6", "PDK1", "KDM3A", "RLF", "HIF1A-AS1", "KMT2E-AS1", "GBE1", 
+  "PNRC1", "SLC2A1", "AK4", "LOC107985", "MIF", "IFNAR1", "TET3", "LINC01792", 
+  "GYPC", "DNAJB12", "HSPG2", "EFNA4-EFNA3", "ZNF654", "CISD2", "RBM33", "KCNAB2", 
+  "ZFAT", "MIR1910", "PFKP", "PPP1R3E", "KDM6B", "HS6ST1", "PPFIA3", "HDHD5-AS1", 
+  "P4HA2", "PSMA1", "COX20", "CIART", "JUN", "ERVE-5", "YEATS2", "SFXN1", 
+  "PHF19", "CAND1.11", "DENND5A", "GNA15", "ZMIZ1", "SAMTOR", "NREP", "NFXL1", 
+  "SULF2", "ADRA1D", "TTC3P1", "TET2", "TBC1D22A", "PTGES3", "LIX1L-AS1", "MATN2", 
+  "PTAFR", "NRN1", "PKM", "IRF2BP2", "DTWD2", "IBA57", "PRSS1", "LOC124902", 
+  "GTF2IRD2B", "R3HCC1L", "TENT4A", "TPI1", "KDM4C", "TXLNA", "PDE11A", "MXI1", 
+  "MBD3", "NCOR2", "HELZ-AS1"
+)
+
+# Set up metadata annotation aesthetics for pheatmap
+annotation_data <- data.frame(Condition = col_data$condition, row.names = colnames(vsd_matrix))
+annotation_colors <- list(
+  Condition = c(
+    "HMGN1 Ctrl normoxia" = "#4DAF4A", 
+    "HMGN1 Ctrl hypoxia"  = "#984EA3", 
+    "HMGN1 KD hypoxia"    = "#FF7F00"
+  )
+)
+
+# ==============================================================================
+# 7. DIRECTIONAL HYPOXIA/CHIP-SEQ HEATMAP PLOTTER FUNCTION
+# ==============================================================================
+generate_directional_combined_heatmap <- function(cell_line_name, raw_res_kd, direction = "down", filename_out) {
+  
+  # A. Subset expression matrix to only include samples for THIS cell line
+  samples_to_keep <- colnames(vsd_matrix)[col_data$cell_line == cell_line_name]
+  if (length(samples_to_keep) == 0) stop("No samples found for: ", cell_line_name)
+  
+  sub_matrix <- vsd_matrix[, samples_to_keep, drop = FALSE]
+  
+  # B. Order columns logically: Normoxia -> Control Hypoxia -> KD Hypoxia
+  target_order <- c("HMGN1 Ctrl normoxia", "HMGN1 Ctrl hypoxia", "HMGN1 KD hypoxia")
+  sort_df <- annotation_data[samples_to_keep, , drop = FALSE]
+  sort_df$Condition <- factor(sort_df$Condition, levels = target_order)
+  ordered_samples <- rownames(sort_df[order(sort_df$Condition), , drop = FALSE])
+  
+  sub_matrix <- sub_matrix[, ordered_samples, drop = FALSE]
+  sub_annotation <- sort_df[ordered_samples, , drop = FALSE]
+  
+  colnames(sub_annotation) <- "Condition"
+  rownames(sub_annotation) <- ordered_samples
+  
+  # C. Simplify column sample names for clean plotting display
+  cond_list <- as.character(sub_annotation$Condition)
+  simplified_names <- ave(cond_list, cond_list, FUN = function(x) {
+    prefix <- switch(x[1],
+                     "HMGN1 Ctrl normoxia" = "ctrl_norm",
+                     "HMGN1 Ctrl hypoxia"  = "ctrl_hyp",
+                     "HMGN1 KD hypoxia"    = "kd_hyp")
+    paste0(prefix, "_", seq_along(x))
+  })
+  colnames(sub_matrix) <- simplified_names
+  rownames(sub_annotation) <- simplified_names
+  
+  # D. Extract and filter DEGs on the HMGN1 KD contrast
+  res_kd <- raw_res_kd[!is.na(raw_res_kd$padj), ]
+  sig_kd_degs <- rownames(res_kd)[res_kd$padj < 0.05]
+  
+  # Match cell-line-specific ChIP-seq list
+  chip_genes <- if (cell_line_name == "THP1") thp1_chip_genes else kasumi_chip_genes
+  
+  # Combine Hallmark Hypoxia and ChIP-seq target lists (union)
+  combined_target_list <- union(hallmark_hypoxia_genes, chip_genes)
+  
+  # Intersect significant DEGs with our combined targets
+  matched_genes <- intersect(sig_kd_degs, combined_target_list)
+  matched_genes <- intersect(matched_genes, rownames(sub_matrix))
+  
+  # Isolate genes by target directionality
+  if (direction == "up") {
+    selected_genes <- matched_genes[res_kd[matched_genes, "log2FoldChange"] > 0]
+    title_suffix <- ": HALLMARK_HYPOXIA & ChIP-seq Targets"
+  } else if (direction == "down") {
+    selected_genes <- matched_genes[res_kd[matched_genes, "log2FoldChange"] < 0]
+    title_suffix <- ": HALLMARK_HYPOXIA & ChIP-seq Targets"
+  } else {
+    stop("Invalid direction selected. Choose 'up' or 'down'.")
+  }
+  
+  if (length(selected_genes) == 0) {
+    message("--> [Warning] No significant ", direction, "regulated targets found for ", cell_line_name, ". Skipping.")
+    return(NULL)
+  }
+  
+  # E. Rank genes by absolute magnitude of Fold Change and select Top 50
+  lfc_values <- abs(res_kd[selected_genes, "log2FoldChange"])
+  names(lfc_values) <- selected_genes
+  top_genes <- names(sort(lfc_values, decreasing = TRUE))[1:min(50, length(lfc_values))]
+  
+  heatmap_data <- sub_matrix[top_genes, , drop = FALSE]
+  
+  # F. Create styled row labels using R's plotmath engine
+  row_labels <- as.expression(lapply(top_genes, function(g) {
+    is_hallmark <- g %in% hallmark_hypoxia_genes
+    is_chip     <- g %in% chip_genes
+    
+    if (is_hallmark && is_chip) {
+      # In both lists: Bold and Underlined
+      bquote(underline(bold(.(g))))
+    } else if (is_chip) {
+      # ChIP-seq target only: Bold
+      bquote(bold(.(g)))
+    } else {
+      # Hallmark Hypoxia only: Plain Text
+      bquote(.(g))
+    }
+  }))
+  
+  # Map pretty display titles
+  display_title_name <- switch(cell_line_name, "THP1" = "THP-1", "Kasumi1" = "Kasumi-1", cell_line_name)
+  
+  # G. Render and print the heatmap
+  pheatmap(
+    heatmap_data,
+    scale = "row",
+    cluster_cols = FALSE,
+    annotation_col = sub_annotation,
+    annotation_colors = annotation_colors,
+    show_colnames = TRUE,
+    labels_row = row_labels,        # Inject our custom plotmath expressions
+    main = paste0(display_title_name, title_suffix),
+    color = colorRampPalette(c("blue", "white", "red"))(100),
+    filename = filename_out,
+    width = 8,
+    height = 10,
+    dpi = 300
+  )
+  
+  if (!is.null(dev.list())) dev.off()
+}
+
+# ==========================================
+# 8. EXECUTE ALL SPLIT RUNS
+# ==========================================
+
+# --- Process THP-1 Heatmaps ---
+generate_directional_combined_heatmap(
+  cell_line_name = "THP1", 
+  raw_res_kd     = res_THP1_kd_vs_ctrl_hyp, 
+  direction      = "up", 
+  filename_out   = "Heatmap_THP1_Hypoxia_ChIP_Upregulated.png"
+)
+
+generate_directional_combined_heatmap(
+  cell_line_name = "THP1", 
+  raw_res_kd     = res_THP1_kd_vs_ctrl_hyp, 
+  direction      = "down", 
+  filename_out   = "Heatmap_THP1_Hypoxia_ChIP_Downregulated.png"
+)
+
+# --- Process Kasumi-1 Heatmaps ---
+generate_directional_combined_heatmap(
+  cell_line_name = "Kasumi1", 
+  raw_res_kd     = res_Kasumi1_kd_vs_ctrl_hyp, 
+  direction      = "up", 
+  filename_out   = "Heatmap_Kasumi1_Hypoxia_ChIP_Upregulated.png"
+)
+
+generate_directional_combined_heatmap(
+  cell_line_name = "Kasumi1", 
+  raw_res_kd     = res_Kasumi1_kd_vs_ctrl_hyp, 
+  direction      = "down", 
+  filename_out   = "Heatmap_Kasumi1_Hypoxia_ChIP_Downregulated.png"
+)
