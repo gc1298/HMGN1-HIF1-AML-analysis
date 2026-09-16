@@ -1,0 +1,159 @@
+### ORA for Kasumi-1 and THP-1 ###
+
+# Install if needed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c("clusterProfiler", "org.Hs.eg.db"))
+install.packages(c("tidyverse"))
+
+# Load
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(ggplot2)
+
+# Load data
+df_thp1 <- read.csv("thp chip.csv")
+df_kasumi <- read.csv("kasumi chip.csv")
+
+# ORA
+run_ora <- function(df, name) {
+  
+  # Filter significant genes
+  df_sig <- df %>%
+    filter(FDR < 0.05, !is.na(SYMBOL))
+  
+  # Convert to Entrez
+  gene_df <- bitr(df_sig$SYMBOL,
+                  fromType = "SYMBOL",
+                  toType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db)
+  
+  genes <- unique(gene_df$ENTREZID)
+  
+  # Run GO enrichment
+  ego <- enrichGO(gene          = genes,
+                  OrgDb         = org.Hs.eg.db,
+                  ont           = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff  = 0.05,
+                  readable      = TRUE)
+  
+  # Run KEGG
+  ekegg <- enrichKEGG(gene         = genes,
+                      organism     = 'hsa',
+                      pvalueCutoff = 0.05)
+  
+  # Save results
+  write.csv(as.data.frame(ego),
+            file.path("ORA_output", paste0(name, "_GO_BP.csv")),
+            row.names = FALSE)
+  
+  write.csv(as.data.frame(ekegg), 
+            file.path("ORA_output", paste0(name, "_KEGG.csv")), 
+            row.names = FALSE)
+  
+  return(list(ego = ego, ekegg = ekegg, genes = genes))
+}
+
+dir.create("ORA_output", showWarnings = FALSE)
+
+ora_thp1 <- run_ora(df_thp1, "THP-1")
+ora_kasumi <- run_ora(df_kasumi, "Kasumi-1")
+
+# Plot GO terms
+p1 <- dotplot(ora_thp1$ego, showCategory = 15) +
+  ggtitle("THP-1 GO BP") +
+  theme(axis.text.y = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5)
+        )
+
+p2 <- dotplot(ora_kasumi$ego, showCategory = 15) +
+  ggtitle("Kasumi-1 GO BP") +
+  theme(axis.text.y = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5)
+        )
+
+ggsave("ORA_output/THP1_GO_BP.png", p1, width = 6, height = 5)
+ggsave("ORA_output/Kasumi_GO_BP.png", p2, width = 6, height = 5)
+
+# Plot KEGG
+if(!is.null(ora_kasumi$ekegg)){
+  p_kegg <- dotplot(ora_kasumi$ekegg, showCategory = 10) + 
+    ggtitle("Kasumi-1 KEGG Pathways") +
+    theme(axis.text.y = element_text(size = 10),
+          plot.title = element_text(hjust = 0.5)
+    )
+  ggsave("ORA_output/Kasumi_KEGG_dotplot.png", p_kegg, width = 7, height = 5)
+}
+
+if(!is.null(ora_thp1$ekegg)){
+  p_kegg <- dotplot(ora_thp1$ekegg, showCategory = 10) + 
+    ggtitle("THP-1 KEGG Pathways")+
+    theme(axis.text.y = element_text(size = 10),
+          plot.title = element_text(hjust = 0.5)
+    )
+  ggsave("ORA_output/THP_KEGG_dotplot.png", p_kegg, width = 7, height = 5)
+}
+
+# Compare ORA results
+res1 <- as.data.frame(ora_thp1$ego)
+res2 <- as.data.frame(ora_kasumi$ego)
+
+res1$cell <- "THP-1"
+res2$cell <- "Kasumi-1"
+
+combined <- rbind(res1, res2)
+
+write.csv(combined, "ORA_output/GO_combined.csv", row.names = FALSE)
+
+# Compare shared pathways and visualise
+res1 <- as.data.frame(ora_thp1$ego)
+res2 <- as.data.frame(ora_kasumi$ego)
+
+# Only proceed if both have results
+shared_terms <- intersect(res1$Description, res2$Description)
+
+if(length(shared_terms) > 0) {
+  res1$cell <- "THP-1"
+  res2$cell <- "Kasumi-1"
+  combined <- rbind(res1, res2)
+  
+  shared_df <- combined %>% filter(Description %in% shared_terms)
+  
+  p_shared <- ggplot(shared_df, aes(x = cell, y = Description)) +
+    geom_point(aes(size = GeneRatio, color = p.adjust)) +
+    scale_color_gradient(low = "red", high = "blue") +
+    theme_minimal() +
+    labs(title = "Shared Biological Processes")
+  
+  ggsave("ORA_output/Shared_Pathways_Comparison.png", p_shared, width = 8, height = 6)
+}
+
+# OVerlap analysis
+genes_thp1 <- unique(df_thp1$SYMBOL[df_thp1$FDR < 0.05])
+genes_kasumi <- unique(df_kasumi$SYMBOL[df_kasumi$FDR < 0.05])
+
+# Stats
+shared_genes <- intersect(genes_thp1, genes_kasumi)
+unique_thp1 <- setdiff(genes_thp1, genes_kasumi)
+unique_kasumi <- setdiff(genes_kasumi, genes_thp1)
+
+length(shared_genes)
+length(unique_thp1)
+length(unique_kasumi)
+
+# Save gene lists
+write.csv(shared_genes, "ORA_output/shared_genes.csv", row.names = FALSE)
+write.csv(unique_thp1, "ORA_output/THP1_unique.csv", row.names = FALSE)
+write.csv(unique_kasumi, "ORA_output/Kasumi_unique.csv", row.names = FALSE)
+
+# Venn diagram
+install.packages("VennDiagram")
+library(VennDiagram)
+
+venn.plot <- venn.diagram(
+  x = list("THP-1" = genes_thp1, "Kasumi-1" = genes_kasumi),
+  filename = "ORA_output/venn.png"
+)
