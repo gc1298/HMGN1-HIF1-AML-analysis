@@ -1,0 +1,94 @@
+### Plot tracks - THP-1 and Kasumi-1 ###
+
+BiocManager::install(c("Gviz", "TxDb.Hsapiens.UCSC.hg38.knownGene", "GenomicFeatures"))
+
+library(Gviz)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# 1. SETUP & REGION (hg38)
+## SMAP2 rep1:
+#chr <- "chr1"
+
+#plot_start <- 40370000
+#plot_end <- 40385000
+#peak_start <- 40374401
+#peak_end <- 40374803
+
+## SLC16A3 rep3:
+#chr <- "chr17"
+
+#plot_start <- 82220000
+#plot_end <- 82245000
+#peak_start <- 82230921
+#peak_end <- 82231321
+
+## KDM4B rep2:
+chr <- "chr19"
+
+plot_start <- 4958000
+plot_end <- 4985000
+peak_start <- 4968408
+peak_end <- 4968808
+
+thp1_path <- "igvFiles - THP-1/99_igvfiles/"
+kasumi_path <- "igvFiles - Kasumi-1/"
+
+# 2. THE GENOME RULER & GENE MODEL
+axisTrack <- GenomeAxisTrack()
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+grTrack <- GeneRegionTrack(txdb, chromosome = chr, start = plot_start, end = plot_end, 
+                           name = "Gene",
+                           transcriptAnnotation = "symbol",
+                           collapseTranscripts = "longest",
+                           fill = "black", background.title = "darkgray")
+
+# For SMAP2 only:
+# target_isoform <- "ENST00000372708.5"
+
+# For SLC16A3 and KDM4B:
+grTrack <- grTrack[gene(grTrack) == "23030"] ##update this to the correct gene ID, KDM3B = 23030, SLC16A3 = 9123, SMAP2 = 64744
+
+# For SMAP2 only:
+#grTrack <- grTrack[transcript(grTrack) == target_isoform]
+
+# 3. THP-1 - double check which rep
+thp1_hypo <- DataTrack(range = paste0(thp1_path, "GC-negD-H-HIF1a_REP2.mLb.clN.bigWig"),
+                       name = "THP-1", fill = "#0F99B2", type="histogram")
+
+# 4. Kasumi-1 - double check which rep
+k1_hypo <- DataTrack(range = paste0(kasumi_path, "GC-negD-H-HIF1a_REP2.mLb.clN.bw"), 
+                     name = "Kasumi-1", fill = "#cc9a2a", type="histogram")
+
+# 5. SET UNIFORM SCALING
+displayPars(thp1_hypo) <- list(ylim = c(0, 2), 
+                               fill = "#8DE6F5",         
+                               col.histogram = "#0F99B2",
+                               collapseTranscripts = FALSE,
+                               background.title = "#0F99B2", 
+                               col.axis = "white",
+                               cex.title = 1.2)
+
+displayPars(k1_hypo) <- list(ylim = c(0, 2), 
+                             fill = "#e1c76a",           
+                             col.histogram = "#cc9a2a",   
+                             collapseTranscripts = FALSE,
+                             background.title = "#cc9a2a", 
+                             col.axis = "white",
+                             cex.title = 1.2)
+
+# 6. HIGHLIGHT THE PEAK REGION
+htTrack <- HighlightTrack(trackList = list(thp1_hypo, k1_hypo),
+                          start = peak_start, end = peak_end,
+                          chromosome = chr, fill = "#FFE30033", col = "transparent")
+
+# 7. FINAL PLOT
+png("KDM4B_v2.png", width = 2500, height = 1500, res = 300)
+
+plotTracks(list(axisTrack, htTrack, grTrack),
+           from = plot_start, to = plot_end, 
+           chromosome = chr,
+           main = "KDM4B",
+           legend = FALSE)
+
+dev.off()
