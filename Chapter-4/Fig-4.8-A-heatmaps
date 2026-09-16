@@ -1,0 +1,104 @@
+## ChIP-seq peak intensity heatmap - change subfolder, file names, and colours as needed
+
+library(GenomicRanges)
+library(rtracklayer)
+library(EnrichedHeatmap)
+library(circlize)
+
+# ==============================================================================
+# 1. LOAD YOUR DATA
+# ==============================================================================
+subfolder <- file.path("igvFiles - Kasumi-1") ## change this as needed, for THP-1: file.path("igvFiles - THP-1", "99_igvfiles"), delete 99_igvfiles for Kasumi
+
+hif1a_peaks  <- import(file.path(subfolder, "HIF1a.consensus_peaks.bed"), format = "BED")
+peak_centers <- resize(hif1a_peaks, width = 1, fix = "center")
+
+# Load bigWigs - .bigWig in THP-1, .bw for Kasumi-1
+bw_hif_rep1 <- import(file.path(subfolder, "GC-negD-N-HIF1a_REP1.mLb.clN.bw"), format = "bigWig")
+bw_hif_rep2 <- import(file.path(subfolder, "GC-negD-N-HIF1a_REP2.mLb.clN.bw"), format = "bigWig")
+bw_hif_rep3 <- import(file.path(subfolder, "GC-negD-N-HIF1a_REP3.mLb.clN.bw"), format = "bigWig")
+
+bw_igg_rep1 <- import(file.path(subfolder, "GC-negD-N-IgG_REP1.mLb.clN.bw"), format = "bigWig")
+bw_igg_rep2 <- import(file.path(subfolder, "GC-negD-N-IgG_REP2.mLb.clN.bw"), format = "bigWig")
+bw_igg_rep3 <- import(file.path(subfolder, "GC-negD-N-IgG_REP3.mLb.clN.bw"), format = "bigWig")
+
+# ==============================================================================
+# 2. GENERATE AND AVERAGE SIGNAL MATRICES
+# ==============================================================================
+## change extend = 2000 for -2kb and +2kb, change axes titles below too
+mat_hif1 <- normalizeToMatrix(bw_hif_rep1, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+mat_hif2 <- normalizeToMatrix(bw_hif_rep2, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+mat_hif3 <- normalizeToMatrix(bw_hif_rep3, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+
+mat_igg1 <- normalizeToMatrix(bw_igg_rep1, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+mat_igg2 <- normalizeToMatrix(bw_igg_rep2, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+mat_igg3 <- normalizeToMatrix(bw_igg_rep3, peak_centers, value_column = "score", extend = 1000, w = 50, mean_mode = "w0")
+
+# Mathematically average the matrices for a clean consensus profile
+mat_hif_avg <- (mat_hif1 + mat_hif2 + mat_hif3) / 3
+mat_igg_avg <- (mat_igg1 + mat_igg2 + mat_igg3) / 3
+
+# Crucial: EnrichedHeatmap attributes must be preserved on the new averaged matrix structure
+class(mat_hif_avg) <- class(mat_hif1)
+attributes(mat_hif_avg) <- attributes(mat_hif1)
+
+class(mat_igg_avg) <- class(mat_igg1)
+attributes(mat_igg_avg) <- attributes(mat_igg1)
+
+# ==============================================================================
+# 3. PLOT CONDENSED TWO-PANEL HEATMAP
+# ==============================================================================
+upper_limit <- 0.250
+
+col_scale <- colorRamp2(
+  c(0, upper_limit * 0.3, upper_limit), 
+  c("white", "#e1c76a", "#cc9a2a")
+)
+
+# THP-1 colours: c("white", "#8DE6F5", "#0F99B2")
+# Kasumi-1 colours: c("white", "#e1c76a", "#cc9a2a")
+
+center_column <- ncol(mat_hif_avg) / 2
+peak_signals  <- mat_hif_avg[, center_column]
+sorted_rows   <- order(peak_signals, decreasing = TRUE)
+
+shared_y_max <- 0.3
+
+png(filename = "Kasumi_heatmaps_nx_v1.png", width = 8, height = 9, units = "in", res = 300)
+
+# Averaged HIF1a Panel
+ht_hif_avg <- EnrichedHeatmap(
+  mat_hif_avg, 
+  col = col_scale, 
+  name = "Signal", 
+  column_title = "HIF1a (Average)",
+  heatmap_legend_param = list(
+    at = c(0, 0.05, 0.1, 0.15, 0.2),         
+    labels = c("0", "0.05", "0.1", "0.15", "0.2")
+  ),
+  top_annotation = HeatmapAnnotation(
+    lines = anno_enriched(
+      ylim = c(0, shared_y_max),
+      gp   = gpar(col = "black", lwd = 2)
+    )
+  ),
+  axis_name = c("-1kb", "Center", "+1kb"), show_row_names = FALSE,
+  cluster_rows = FALSE, row_order = sorted_rows
+)
+
+# Averaged IgG Panel
+ht_igg_avg <- EnrichedHeatmap(
+  mat_igg_avg, col = col_scale, show_heatmap_legend = FALSE, column_title = "IgG Control (Average)",
+  top_annotation = HeatmapAnnotation(
+    lines = anno_enriched(
+      ylim = c(0, shared_y_max), 
+      gp   = gpar(col = "black", lwd = 2)
+    )
+  ),
+  axis_name = c("-1kb", "Center", "+1kb"), show_row_names = FALSE,
+  cluster_rows = FALSE, row_order = sorted_rows
+)
+
+draw(ht_hif_avg + ht_igg_avg, ht_gap = unit(6, "mm"))
+
+dev.off()
