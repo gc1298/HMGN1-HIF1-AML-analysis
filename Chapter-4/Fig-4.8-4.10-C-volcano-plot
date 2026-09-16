@@ -1,0 +1,144 @@
+# Load required libraries
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(scales)
+
+# ==========================================
+# 1. DEFINE YOUR GENE LISTS & PARAMETERS
+# ==========================================
+canonical_hypoxia <- c(
+  "ADM", "ADORA2B", "AK4", "AKAP12", "ALDOA", "ALDOB", "ALDOC", "AMPD3", 
+  "ANGPTL4", "ANKZF1", "ANXA2", "ATF3", "ATP7A", "B3GALT6", "B4GALNT2", 
+  "BCAN", "BCL2", "BGN", "BHLHE40", "BNIP3L", "BRS3", "BTG1", "CA12", 
+  "CASP6", "CAV1", "CCNG2", "NOCT", "CDKN1A", "CDKN1B", "CDKN1C", "CHST2", 
+  "CHST3", "CITED2", "COL5A1", "CP", "CSRP2", "CCN2", "CXCR4", "ACKR3", 
+  "CCN1", "DCN", "DDIT3", "DDIT4", "DPYSL4", "DTNA", "DUSP1", "EDN2", 
+  "EFNA1", "EFNA3", "EGFR", "ENO1", "ENO2", "ENO3", "ERO1A", "ERRFI1", 
+  "ETS1", "EXT1", "F3", "FAM162A", "FBP1", "FOS", "FOSL2", "FOXO3", 
+  "GAA", "GALK1", "GAPDH", "GAPDHS", "GBE1", "GCK", "GCNT2", "GLRX", 
+  "GPC1", "GPC3", "GPC4", "GPI", "GRHPR", "GYS1", "HAS1", "HDLBP", 
+  "HEXA", "HK1", "HK2", "HMOX1", "HOXB9", "HS3ST1", "HSPA5", "IDS", 
+  "IER3", "IGFBP1", "IGFBP3", "IL6", "ILVBL", "INHA", "IRS2", "ISG20", 
+  "JMJD6", "JUN", "KDELR3", "KDM3A", "KIF5A", "KLF6", "KLF7", "KLHL24", 
+  "LALBA", "LARGE1", "LDHA", "LDHC", "LOX", "LXN", "MAFF", "MAP3K1", 
+  "MIF", "MT1E", "MT2A", "MXI1", "MYH9", "NAGK", "NCAN", "NDRG1", 
+  "NDST1", "NDST2", "NEDD4L", "NFIL3", "NR3C1", "P4HA1", "P4HA2", "PAM", 
+  "PCK1", "PDGFB", "PDK1", "PDK3", "PFKFB3", "PFKL", "PFKP", "PGAM2", 
+  "PGF", "PGK1", "PGM1", "PGM2", "PHKG1", "PIM1", "PKLR", "PKP1", 
+  "PLAC8", "PLAUR", "PLIN2", "PNRC1", "PPARGC1A", "PPFIA4", "PPP1R15A", 
+  "PPP1R3C", "PRDX5", "PRKCA", "CAVIN3", "CAVIN1", "PYGM", "RBPJ", 
+  "RORA", "RRAGD", "S100A4", "SAP30", "SCARB1", "SDC2", "SDC3", "SDC4", 
+  "SELENBP1", "SERPINE1", "SIAH2", "SLC25A1", "SLC2A1", "SLC2A3", "SLC2A5", 
+  "SLC37A4", "SLC6A6", "SRPX", "STBD1", "STC1", "STC2", "SULT2B1", 
+  "TES", "TGFB3", "TGFBI", "TGM2", "TIPARP", "TKTL1", "TMEM45A", "TNFAIP3", 
+  "TPBG", "TPD52", "TPI1", "TPST2", "UGP2", "VEGFA", "VHL", "VLDLR", 
+  "CCN5", "WSB1", "XPNPEP1", "ZFP36", "ZNF292"
+)
+
+x_limits <- c(-5, 15)
+
+# Define the palette colors using your updated class names
+thp1_colors <- c(
+  "HALLMARK_HYPOXIA"     = "#0f99b2",  
+  "Non-Canonical Target" = "#8de6f5",  
+  "Not Significant"      = "#D3D3D3"   
+)
+
+kasumi_colors <- c(
+  "HALLMARK_HYPOXIA"     = "#AE8224",  
+  "Non-Canonical Target" = "#e1c76a",  
+  "Not Significant"      = "#D3D3D3"   
+)
+
+# ==========================================
+# 2. THE PRODUCTION-READY FUNCTION
+# ==========================================
+make_volcano_plot <- function(df, display_title, cell_colors, y_max) {
+  
+  # A. Categorize genes using your updated label name
+  df <- df %>%
+    mutate(
+      Gene_Class = case_when(
+        Gene %in% canonical_hypoxia ~ "HALLMARK_HYPOXIA",
+        log10padj > 1.3 & abs(log2FC) > 1 ~ "Non-Canonical Target",
+        TRUE ~ "Not Significant"
+      ),
+      Gene_Class = factor(Gene_Class, levels = c("Not Significant", "Non-Canonical Target", "HALLMARK_HYPOXIA"))
+    )
+  
+  # B. Identify top 5 enriched genes
+  top5_genes <- df %>%
+    filter(log10padj > 1.3 & log2FC > 0) %>%
+    arrange(desc(log2FC)) %>% 
+    head(5) %>%
+    pull(Gene)
+  
+  df <- df %>%
+    mutate(Label = if_else(Gene %in% top5_genes, as.character(Gene), ""))
+  
+  # C. Create the plot
+  ggplot(df, aes(x = log2FC, y = log10padj, color = Gene_Class)) +
+    geom_point(aes(size = Gene_Class, alpha = Gene_Class)) +
+    
+    scale_color_manual(
+      values = cell_colors,
+      breaks = c("Non-Canonical Target", "HALLMARK_HYPOXIA")
+    ) +
+    scale_size_manual(values = c("HALLMARK_HYPOXIA" = 3.0, "Non-Canonical Target" = 1.8, "Not Significant" = 1.2), guide = "none") +
+    scale_alpha_manual(values = c("HALLMARK_HYPOXIA" = 0.95, "Non-Canonical Target" = 0.75, "Not Significant" = 0.40), guide = "none") +
+    
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray50", linewidth = 0.4) +
+    geom_hline(yintercept = 1.3, linetype = "dashed", color = "gray50", linewidth = 0.4) +
+    
+    geom_text_repel(aes(label = Label), color = "black", size = 5, fontface = "bold",
+                    box_padding = 0.4, point_padding = 0.3, segment.color = "gray30", segment.linewidth = 0.4, max.overlaps = Inf) +
+    
+    # Custom axes configuration
+    xlim(x_limits) + 
+    ylim(c(0, y_max)) +
+    
+    # Title, added cleaner axis labels, and removed legend header text
+    labs(title = display_title, 
+         x = expression(bold(log[2](FC))), 
+         y = expression(bold(-log[10](p.adj))),
+         color = NULL) +
+    
+    theme_bw() +
+    theme(
+      
+      plot.title = element_text(size = 22, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+      
+      axis.title.x = element_text(size = 13, face = "bold"),
+      axis.title.y = element_text(size = 13, face = "bold"),
+      
+      legend.position = "bottom", 
+      legend.direction = "horizontal",
+      legend.text = element_text(size = 15, face = "bold"), 
+      
+      panel.grid.minor = element_blank(), 
+      panel.grid.major = element_line(color = "gray95"),
+      
+      panel.background = element_rect(fill = alpha("white", 0.25), color = NA),
+      plot.background  = element_rect(fill = alpha("white", 0.25), color = NA),
+      legend.background = element_rect(fill = alpha("white", 0.25), color = NA)
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 4, alpha = 1))) 
+}
+
+# ==========================================
+# 3. RELOAD DATA AND RUN PIPELINE
+# ==========================================
+thp1_data <- read.csv("thp chip - OG.csv") %>% 
+  mutate(log2FC = Fold, log10padj = -log10(FDR), Gene = SYMBOL)
+
+kasumi_data <- read.csv("kasumi chip.csv") %>% 
+  mutate(log2FC = Fold, log10padj = -log10(FDR), Gene = SYMBOL)
+
+thp1_plot   <- make_volcano_plot(thp1_data, "THP-1: Hypoxia vs Normoxia", thp1_colors, y_max = 15)
+kasumi_plot <- make_volcano_plot(kasumi_data,"Kasumi-1: Hypoxia vs Normoxia", kasumi_colors, y_max = 25)
+
+# Export figures
+ggsave("THP1_color_volcano_v8.png", thp1_plot, width = 7, height = 6.5, dpi = 300, bg = "transparent")
+ggsave("Kasumi1_color_volcano_v9.png", kasumi_plot, width = 7, height = 6.5, dpi = 300, bg = "transparent")
