@@ -1,0 +1,263 @@
+########################################################################
+# TCGA-LUAD pipeline — Buffa hypoxia score + HMGN1 analysis
+########################################################################
+
+# === 0. Packages ===
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+pkgs <- c("TCGAbiolinks","SummarizedExperiment","DESeq2","GSVA","dplyr","tibble",
+          "ggplot2","ggrepel","ggpubr","org.Hs.eg.db","survival","survminer")
+for(p in pkgs){
+  if(!requireNamespace(p, quietly = TRUE)){
+    BiocManager::install(p, ask = FALSE)
+  }
+}
+suppressPackageStartupMessages({
+  library(TCGAbiolinks)
+  library(SummarizedExperiment)
+  library(DESeq2)
+  library(GSVA)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggrepel)
+  library(ggpubr)
+  library(org.Hs.eg.db)
+  library(survival)
+  library(survminer)
+})
+
+# === 1. Output folders ===
+dir.create("results", showWarnings = FALSE)
+dir.create(file.path("results","plots"), showWarnings = FALSE)
+dir.create(file.path("results","tables"), showWarnings = FALSE)
+
+# === 2. Prepare clinical data ===
+gdc_parent <- "GDCdata"                     
+if(!dir.exists(gdc_parent)) dir.create(gdc_parent, recursive = TRUE)
+
+project_dir <- file.path(gdc_parent, "TCGA-LUAD")
+if(!dir.exists(project_dir)) dir.create(project_dir, recursive = TRUE)
+subdirs <- c(
+  file.path(project_dir, "Transcriptome_Profiling"),
+  file.path(project_dir, "Transcriptome_Profiling", "Gene_Expression_Quantification")
+)
+for(s in subdirs) if(!dir.exists(s)) dir.create(s, recursive = TRUE)
+
+query <- GDCquery(project = "TCGA-LUAD",
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "STAR - Counts")
+
+files_exist <- any(grepl("TCGA-LUAD", list.files(gdc_parent, recursive = TRUE)))
+if(!files_exist){
+  message("Downloading TCGA-LUAD data (this may take a while)...")
+  GDCdownload(query, directory = gdc_parent)
+} else message("TCGA-LUAD files already present; skipping download.")
+
+data_se <- GDCprepare(query, directory = gdc_parent)
+counts <- assay(data_se)
+colnames(counts) <- substr(colnames(counts),1,15)
+
+# === 3. VST normalization ===
+dds_all <- DESeqDataSetFromMatrix(countData = counts,
+                                  colData = DataFrame(row.names = colnames(counts)),
+                                  design = ~1)
+dds_all <- DESeq(dds_all)
+vsd <- vst(dds_all, blind = TRUE)
+expr_vst <- assay(vsd)
+
+# === 4. Map ENSEMBL -> SYMBOL ===
+ensembl_ids <- gsub("\\..*$","", rownames(expr_vst))
+symbol_map <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL",
+                     column = "SYMBOL", multiVals = "first")
+rownames(expr_vst) <- symbol_map
+rownames(counts) <- symbol_map
+
+keep <- !is.na(rownames(expr_vst)) & (rownames(expr_vst) != "")
+expr_vst <- expr_vst[keep, , drop = FALSE]
+counts <- counts[rownames(counts) %in% rownames(expr_vst), , drop = FALSE]
+expr_vst <- expr_vst[!duplicated(rownames(expr_vst)), ]
+counts   <- counts[!duplicated(rownames(counts)), ]
+
+# === 5. Hypoxia signature ===
+hypoxia_signature <- c("VEGFA", "PGAM1", "ENO1", "LDHA", "TPI1", "P4HA1", "MRPS17", 
+                       "ADM", "NDRG1", "TUBB6", "ALDOA", "MIF", "SLC2A1", "CDKN3", "ACOT7")
+
+present <- intersect(hypoxia_signature, rownames(expr_vst))
+message(length(present), " of ", length(hypoxia_signature), " hypoxia genes present.")
+if(length(present) < 5) stop("Too few hypoxia genes present after mapping.")
+
+# === 6. GSVA ===
+mat <- as.matrix(expr_vst)
+storage.mode(mat) <- "double"
+
+gset <- list(HYPOXIA_15 = present)
+
+param <- GSVA::ssgseaParam(
+  exprData = mat,
+  geneSets = gset
+)
+
+gsva_res <- tryCatch({
+  GSVA::gsva(param, verbose = TRUE)
+}, error = function(e) {
+  message("GSVA failed: ", e$message, "\nFalling back to metagene mean.")
+  m <- matrix(colMeans(mat[present, , drop = FALSE]), nrow = 1,
+              dimnames = list("HYPOXIA_15", colnames(mat)))
+  m
+})
+
+hypoxia_scores_vec <- as.numeric(gsva_res["HYPOXIA_15", ])
+names(hypoxia_scores_vec) <- colnames(mat)
+
+write.csv(
+  data.frame(sample = names(hypoxia_scores_vec),
+             HypoxiaScore = hypoxia_scores_vec),
+  file = file.path("results", "tables", "hypoxia_scores.csv"),
+  row.names = FALSE
+)
+
+# === 7. Define hypoxic samples ===
+q5 <- quantile(hypoxia_scores_vec, 0.25, na.rm = TRUE)
+hypoxic_samples <- names(hypoxia_scores_vec)[hypoxia_scores_vec >= q5]
+message("Hypoxic samples (top half): ", length(hypoxic_samples))
+
+# === 8. Split hypoxic samples by HMGN1 expression (upper vs lower quartiles) ===
+if(!"HMGN1" %in% rownames(expr_vst))
+  stop("HMGN1 not found in expression matrix.")
+
+hmgn1_all <- expr_vst["HMGN1", hypoxic_samples, drop = TRUE]
+q1_h <- quantile(hmgn1_all, 0.25, na.rm = TRUE)
+q3_h <- quantile(hmgn1_all, 0.75, na.rm = TRUE)
+
+low_samples  <- names(hmgn1_all[hmgn1_all < q1_h])
+high_samples <- names(hmgn1_all[hmgn1_all > q3_h])
+
+message("Within hypoxic: Low HMGN1 = ", length(low_samples),
+        "; High HMGN1 = ", length(high_samples))
+
+if(length(low_samples) < 2 | length(high_samples) < 2)
+  warning("Very small groups for DE/survival — results may be unstable.")
+
+de_samples <- c(low_samples, high_samples)
+group_factor <- factor(
+  c(rep("Low_HMGN1", length(low_samples)),
+    rep("High_HMGN1", length(high_samples))),
+  levels = c("Low_HMGN1", "High_HMGN1")
+)
+names(group_factor) <- de_samples
+
+# === 9. Differential expression with DESeq2 (High vs Low within hypoxic) ===
+counts_sub <- counts[, de_samples, drop = FALSE]
+
+coldata_sub <- data.frame(
+  sample = de_samples,
+  group = group_factor[de_samples],
+  row.names = de_samples
+)
+
+dds_sub <- DESeqDataSetFromMatrix(
+  countData = counts_sub,
+  colData = coldata_sub,
+  design = ~ group
+)
+
+dds_sub <- DESeq(dds_sub)
+res <- results(dds_sub, contrast = c("group", "High_HMGN1", "Low_HMGN1"))
+res_df <- as.data.frame(res) %>% tibble::rownames_to_column("gene")
+
+write.csv(res_df, file = file.path("results", "tables", "DE_results_all.csv"), row.names = FALSE)
+
+hallmark_hypoxia <- c(
+  "ADM","ADORA2B","AK4","AKAP12","ALDOA","ALDOB","ALDOC","AMPD3","ANGPTL4","ANKZF1","ANXA2",
+  "ATF3","ATP7A","B3GALT6","B4GALNT2","BCAN","BCL2","BGN","BHLHE40","BNIP3L","BRS3","BTG1",
+  "CA12","CASP6","CAV1","CCNG2","NOCT","CDKN1A","CDKN1B","CDKN1C","CHST2","CHST3","CITED2",
+  "COL5A1","CP","CSRP2","CCN2","CXCR4","ACKR3","CCN1","DCN","DDIT3","DDIT4","DPYSL4","DTNA",
+  "DUSP1","EDN2","EFNA1","EFNA3","EGFR","ENO1","ENO2","ENO3","ERO1A","ERRFI1","ETS1","EXT1",
+  "F3","FAM162A","FBP1","FOS","FOSL2","FOXO3","GAA","GALK1","GAPDH","GAPDHS","GBE1","GCK",
+  "GCNT2","GLRX","GPC1","GPC3","GPC4","GPI","GRHPR","GYS1","HAS1","HDLBP","HEXA","HK1","HK2",
+  "HMOX1","HOXB9","HS3ST1","HSPA5","IDS","IER3","IGFBP1","IGFBP3","IL6","ILVBL","INHA","IRS2",
+  "ISG20","JMJD6","JUN","KDELR3","KDM3A","KIF5A","KLF6","KLF7","KLHL24","LALBA","LARGE1","LDHA",
+  "LDHC","LOX","LXN","MAFF","MAP3K1","MIF","MT1E","MT2A","MXI1","MYH9","NAGK","NCAN","NDRG1",
+  "NDST1","NDST2","NEDD4L","NFIL3","NR3C1","P4HA1","P4HA2","PAM","PCK1","PDGFB","PDK1","PDK3",
+  "PFKFB3","PFKL","PFKP","PGAM2","PGF","PGK1","PGM1","PGM2","PHKG1","PIM1","PKLR","PKP1",
+  "PLAC8","PLAUR","PLIN2","PNRC1","PPARGC1A","PPFIA4","PPP1R15A","PPP1R3C","PRDX5","PRKCA",
+  "CAVIN3","CAVIN1","PYGM","RBPJ","RORA","RRAGD","S100A4","SAP30","SCARB1","SDC2","SDC3",
+  "SDC4","SELENBP1","SERPINE1","SIAH2","SLC25A1","SLC2A1","SLC2A3","SLC2A5","SLC37A4","SLC6A6",
+  "SRPX","STBD1","STC1","STC2","SULT2B1","TES","TGFB3","TGFBI","TGM2","TIPARP","TKTL1",
+  "TMEM45A","TNFAIP3","TPBG","TPD52","TPI1","TPST2","UGP2","VEGFA","VHL","VLDLR","CCN5",
+  "WSB1","XPNPEP1","ZFP36","ZNF292"
+)
+
+if (!exists("hallmark_hypoxia")) stop("hallmark_hypoxia gene list not found in environment!")
+
+message("Matched ", sum(res_df$gene %in% hallmark_hypoxia), " genes from Hallmark Hypoxia signature in DE results.")
+
+res_df <- res_df %>%
+  mutate(direction = case_when(
+    !is.na(padj) & padj < 0.05 & log2FoldChange > 0.5  ~ "Up_in_High",
+    !is.na(padj) & padj < 0.05 & log2FoldChange < -0.5 ~ "Down_in_High",
+    TRUE ~ "Not_Significant"
+  ))
+
+# Save significant lists
+write.csv(res_df %>% filter(direction == "Up_in_High"),
+          file = file.path("results", "tables", "sig_up_in_high.csv"),
+          row.names = FALSE)
+write.csv(res_df %>% filter(direction == "Down_in_High"),
+          file = file.path("results", "tables", "sig_down_in_high.csv"),
+          row.names = FALSE)
+
+# Save all significant genes that are in the Hallmark Hypoxia gene set
+sig_hallmark_hypoxia <- res_df %>%
+  filter(
+    gene %in% hallmark_hypoxia,
+    padj < 0.05,
+    abs(log2FoldChange) > 0.5
+  ) %>%
+  arrange(padj)
+
+write.csv(sig_hallmark_hypoxia,
+          file = file.path("results", "tables", "sig_hallmark_hypoxia_genes_logfc_one.csv"),
+          row.names = FALSE)
+
+message("Saved ", nrow(sig_hallmark_hypoxia), " significant genes in the Hallmark Hypoxia gene set.")
+
+# === 10. Volcano plot ===
+res_df_filt <- res_df %>% filter(gene != "HMGN1")
+
+volcano_file <- file.path("results", "plots", "volcano_HMGN1_hypoxic_v6.png")
+
+# Identify top significant genes in the Hallmark Hypoxia set
+label_set <- sig_hallmark_hypoxia %>%
+  dplyr::filter(direction %in% c("Up_in_High", "Down_in_High")) %>%
+  dplyr::group_by(direction) %>%
+  dplyr::arrange(padj) %>%
+  dplyr::slice_head(n = 10) %>%
+  dplyr::ungroup()
+
+# Volcano plot
+p_volcano <- ggplot(res_df_filt, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = direction), alpha = 0.6, size = 1.8, na.rm = TRUE) +
+  scale_color_manual(values = c("Up_in_High" = "red", "Down_in_High" = "blue", "Not_Significant" = "grey70")) + 
+  geom_text_repel(data = label_set, aes(label = gene), 
+                  color = "black", size = 3, max.overlaps = 30, segment.color = "grey60") + 
+  theme_minimal(base_size = 14) +
+  labs(title = "Significant Hallmark Hypoxia Genes: High vs Low HMGN1 (Hypoxic LUAD)",
+       x = "log2(FC)",
+       y = "-log10(padj)")
+
+ggsave(volcano_file, p_volcano, width = 9, height = 6, dpi = 300)
+
+# Save labeled genes
+write.csv(label_set,
+          file = file.path("results", "tables", "volcano_labeled_genes_v3.csv"),
+          row.names = FALSE)
+
+# === 11. Save workspace / results ===
+saveRDS(expr_vst, file = file.path("results","expr_vst.rds"))
+saveRDS(gsva_res, file = file.path("results","gsva_res.rds"))
+saveRDS(res_df, file = file.path("results","DE_results_processed.rds"))
+save.image(file = file.path("results","workspace.RData"))
+
+message("All done. Plots and tables saved to 'results/plots' and 'results/tables' respectively.")
