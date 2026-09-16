@@ -1,0 +1,367 @@
+################################################################################
+# OHSU AML Hypoxia/HMGN1 Analysis
+################################################################################
+
+# --- 1. CONFIGURATION AND PACKAGE LOADING ---
+library(GSVA)
+library(limma)
+library(org.Hs.eg.db)
+library(BiocParallel)
+library(dplyr)
+library(tibble)
+library(readr)
+library(ggplot2)
+library(ggpubr)
+library(EnhancedVolcano)
+set.seed(123)
+
+EXPRESSION_FILE <- "aml_ohsu_2022/data_mrna_seq_rpkm.txt" 
+HMGN1_GENE <- "HMGN1"
+
+# Hypoxia gene signature (HUGO Symbols)
+HYPOXIA_GENES <- c("ALDOC", "BATF3", "COL5A1", "DR1", "ELOB", "HBP1", 
+                   "HK1", "KRT14", "NOS2", "PSMA2", "PSMA7", "PSMB6", 
+                   "PSMC1", "PTGS1", "SIAH2", "SORL1", "THBS1", "UBA52") 
+
+# --- 2. DATA LOADING AND INITIAL PREPARATION (MODIFIED) ---
+dir.create("results_v3", showWarnings = FALSE)
+dir.create("tables_v3", showWarnings = FALSE)
+
+GENE_COL_NAME <- "Hugo_Symbol"
+
+print("Step 2: Loading data and forcing unique Hugo_Symbols as row names...")
+
+expr_initial <- read.delim(EXPRESSION_FILE, header = TRUE, sep = "\t", check.names = FALSE)
+
+if (!GENE_COL_NAME %in% colnames(expr_initial)) {
+  stop(paste0("ERROR: Could not find column '", GENE_COL_NAME, "' in the file."))
+}
+
+# Extract and normalize gene symbols
+gene_symbols <- expr_initial[[GENE_COL_NAME]]
+gene_symbols_upper <- toupper(gene_symbols)
+
+unique_index <- !duplicated(gene_symbols_upper)
+num_removed <- sum(duplicated(gene_symbols_upper))
+
+# Filter data to unique genes
+expr_unique <- expr_initial[unique_index, ]
+
+# Set uppercase row names
+rownames(expr_unique) <- gene_symbols_upper[unique_index]
+
+# Drop the gene symbol column
+expr <- expr_unique[, !(colnames(expr_unique) %in% GENE_COL_NAME)]
+
+# Convert to matrix
+expr <- as.matrix(expr)
+mode(expr) <- "numeric"
+
+# Sanity checks
+if (anyNA(expr)) {
+  warning("⚠️ Missing values detected; consider filtering or imputing them.")
+}
+
+if (anyDuplicated(rownames(expr))) {
+  stop("CRITICAL ERROR: Duplicated row names persist after filtering.")
+}
+
+cat("✅ Expression matrix successfully loaded.\n")
+cat(paste(" →", nrow(expr), "unique genes x", ncol(expr), "samples\n"))
+cat(paste(" → Removed", num_removed, "duplicate gene entries after uppercasing.\n"))
+
+write.table(expr, file = "tables_v3/OHSU_AML_expression_cleaned.tsv", sep = "\t", quote = FALSE)
+
+gene_sets <- list(hypoxia = toupper(HYPOXIA_GENES))
+
+# --- 3. COMPUTE GSVA HYPOXIA SCORES (ssGSEA) ---
+print("Step 3: Computing GSVA ssGSEA hypoxia scores...")
+param <- ssgseaParam(exprData = expr, geneSets = gene_sets,
+                     minSize = 1, maxSize = Inf, alpha = 0.25, normalize = TRUE)
+gsva_scores <- gsva(param, verbose = TRUE, BPPARAM = SerialParam())
+hypoxia_scores <- gsva_scores["hypoxia", ]
+
+# --- 4. SELECT TOP QUARTILE HYPOXIC SAMPLES ---
+print("Step 4: Subsetting to top quartile hypoxic samples (Q4)...")
+top_quartile_threshold <- quantile(hypoxia_scores, 0.75, na.rm = TRUE)
+hypoxic_samples <- names(hypoxia_scores)[hypoxia_scores >= top_quartile_threshold]
+
+expr_hypoxic <- expr[, hypoxic_samples]
+hypoxia_subset <- hypoxia_scores[hypoxic_samples]
+
+cat("   -> Total samples in hypoxic subset:", length(hypoxic_samples), "\n")
+
+# --- 5. STRATIFY BY HMGN1 EXPRESSION WITHIN HYPOXIC SUBSET ---
+print("Step 5: Stratifying hypoxic samples by HMGN1 expression...")
+hmgn1_expr <- expr_hypoxic[HMGN1_GENE, ]
+hmgn1_expr <- na.omit(hmgn1_expr) 
+
+hmgn1_low  <- names(hmgn1_expr)[hmgn1_expr <= quantile(hmgn1_expr, 0.25)]
+hmgn1_high <- names(hmgn1_expr)[hmgn1_expr >= quantile(hmgn1_expr, 0.75)]
+
+group <- ifelse(colnames(expr_hypoxic) %in% hmgn1_high, "High_HMGN1",
+                ifelse(colnames(expr_hypoxic) %in% hmgn1_low, "Low_HMGN1", NA))
+
+valid_samples <- !is.na(group)
+expr_de <- expr_hypoxic[, valid_samples]
+group <- factor(group[valid_samples], levels = c("Low_HMGN1", "High_HMGN1"))
+names(group) <- colnames(expr_de)
+
+cat("   -> HMGN1 Low:", length(hmgn1_low), "| HMGN1 High:", length(hmgn1_high), "\n")
+
+# --- 6. DIFFERENTIAL EXPRESSION ANALYSIS (High vs Low HMGN1) ---
+print("Step 6: Performing Differential Expression Analysis (limma)...")
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+fit <- lmFit(expr_de, design)
+contrast.matrix <- makeContrasts(HighvsLow = High_HMGN1 - Low_HMGN1, levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+deg <- topTable(fit2, coef = 1, n = Inf, sort.by = "P")
+deg <- deg[!rownames(deg) %in% HMGN1_GENE, ] # Remove HMGN1 itself
+
+write.csv(deg, "tables_v3/DE_results_High_vs_Low_HMGN1.csv")
+print("   -> Full DEG table saved to tables/DE_results_High_vs_Low_HMGN1.csv")
+
+# --- 7. VOLCANO PLOT (Hallmark Hypoxia Highlight) ---
+print("Step 7: Generating Volcano plot...")
+
+# --- Hallmark Hypoxia gene set (MSigDB) ---
+hallmark_hypoxia <- c(
+  "ADM","ADORA2B","AK4","AKAP12","ALDOA","ALDOB","ALDOC","AMPD3","ANGPTL4","ANKZF1","ANXA2",
+  "ATF3","ATP7A","B3GALT6","B4GALNT2","BCAN","BCL2","BGN","BHLHE40","BNIP3L","BRS3","BTG1",
+  "CA12","CASP6","CAV1","CCNG2","NOCT","CDKN1A","CDKN1B","CDKN1C","CHST2","CHST3","CITED2",
+  "COL5A1","CP","CSRP2","CCN2","CXCR4","ACKR3","CCN1","DCN","DDIT3","DDIT4","DPYSL4","DTNA",
+  "DUSP1","EDN2","EFNA1","EFNA3","EGFR","ENO1","ENO2","ENO3","ERO1A","ERRFI1","ETS1","EXT1",
+  "F3","FAM162A","FBP1","FOS","FOSL2","FOXO3","GAA","GALK1","GAPDH","GAPDHS","GBE1","GCK",
+  "GCNT2","GLRX","GPC1","GPC3","GPC4","GPI","GRHPR","GYS1","HAS1","HDLBP","HEXA","HK1","HK2",
+  "HMOX1","HOXB9","HS3ST1","HSPA5","IDS","IER3","IGFBP1","IGFBP3","IL6","ILVBL","INHA","IRS2",
+  "ISG20","JMJD6","JUN","KDELR3","KDM3A","KIF5A","KLF6","KLF7","KLHL24","LALBA","LARGE1","LDHA",
+  "LDHC","LOX","LXN","MAFF","MAP3K1","MIF","MT1E","MT2A","MXI1","MYH9","NAGK","NCAN","NDRG1",
+  "NDST1","NDST2","NEDD4L","NFIL3","NR3C1","P4HA1","P4HA2","PAM","PCK1","PDGFB","PDK1","PDK3",
+  "PFKFB3","PFKL","PFKP","PGAM2","PGF","PGK1","PGM1","PGM2","PHKG1","PIM1","PKLR","PKP1",
+  "PLAC8","PLAUR","PLIN2","PNRC1","PPARGC1A","PPFIA4","PPP1R15A","PPP1R3C","PRDX5","PRKCA",
+  "CAVIN3","CAVIN1","PYGM","RBPJ","RORA","RRAGD","S100A4","SAP30","SCARB1","SDC2","SDC3",
+  "SDC4","SELENBP1","SERPINE1","SIAH2","SLC25A1","SLC2A1","SLC2A3","SLC2A5","SLC37A4","SLC6A6",
+  "SRPX","STBD1","STC1","STC2","SULT2B1","TES","TGFB3","TGFBI","TGM2","TIPARP","TKTL1",
+  "TMEM45A","TNFAIP3","TPBG","TPD52","TPI1","TPST2","UGP2","VEGFA","VHL","VLDLR","CCN5",
+  "WSB1","XPNPEP1","ZFP36","ZNF292"
+)
+
+# --- Prepare data frame for plotting ---
+res_df <- deg %>%
+  dplyr::mutate(
+    gene = rownames(deg),
+    padj = adj.P.Val,
+    log2FoldChange = logFC,
+    direction = dplyr::case_when(
+      padj < 0.05 & log2FoldChange > 0.5  ~ "Up_in_High",
+      padj < 0.05 & log2FoldChange < -0.5 ~ "Down_in_High",
+      TRUE ~ "Not_Significant"
+    ),
+    hallmark_flag = ifelse(gene %in% hallmark_hypoxia, TRUE, FALSE)
+  )
+
+# Save significant lists
+write.csv(res_df %>% filter(direction == "Up_in_High"),
+          file = file.path("tables_v3", "sig_up_in_high.csv"),
+          row.names = FALSE)
+write.csv(res_df %>% filter(direction == "Down_in_High"),
+          file = file.path("tables_v3", "sig_down_in_high.csv"),
+          row.names = FALSE)
+
+sig_hallmark_hypoxia <- res_df %>%
+  filter(
+    gene %in% hallmark_hypoxia,
+    padj < 0.05,
+    abs(log2FoldChange) > 0.5
+  ) %>%
+  arrange(padj)
+
+write.csv(sig_hallmark_hypoxia,
+          file = file.path("tables_v3", "sig_hallmark_hypoxia_genes_logfc_pointfive.csv"),
+          row.names = FALSE)
+
+message("Saved ", nrow(sig_hallmark_hypoxia), " significant genes in the Hallmark Hypoxia gene set.")
+
+# --- Identify top significant Hallmark Hypoxia genes for labeling ---
+label_set <- res_df %>%
+  dplyr::filter(hallmark_flag, padj < 0.05, abs(log2FoldChange) > 0.5) %>%
+  dplyr::arrange(padj) %>%
+  head(30)
+
+cat("Matched", sum(res_df$hallmark_flag), "genes from Hallmark Hypoxia signature in DE results.\n")
+
+# --- Volcano plot (ggplot style) ---
+p_volcano <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  # Base points (non-hallmark)
+  geom_point(data = subset(res_df, !hallmark_flag),
+             aes(color = direction),
+             alpha = 0.4, size = 1.5) +
+    # Label selected hallmark genes
+  ggrepel::geom_text_repel(data = label_set,
+                           aes(label = gene),
+                           color = "black",
+                           size = 3,
+                           max.overlaps = 30,
+                           segment.color = "grey60") +
+  scale_color_manual(values = c(
+    "Up_in_High" = "red",
+    "Down_in_High" = "blue",
+    "Not_Significant" = "grey70"
+  )) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste("Hallmark Hypoxia Genes — High vs Low", HMGN1_GENE, "(Hypoxic AML)"),
+    x = "log2(FC)",
+    y = "-log10(padj)",
+    color = "Direction"
+  ) + theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# --- Save plot ---
+ggsave("results_v3/volcano_HMGN1_hallmark_hypoxia_5.png", p_volcano, width = 9, height = 6, dpi = 300)
+print("   -> Volcano plot saved to results_v3/volcano_HMGN1_hallmark_hypoxia.png")
+
+# --- 8. VOLCANO PLOT (ALL SIGNIFICANT GENES, NOT FILTERED BY HALLMARK) ---
+print("Step 9: Generating Volcano plot for all DE genes (no Hallmark filter)...")
+
+# Define significance thresholds
+padj_cutoff <- 0.05
+logfc_cutoff <- 0.5
+
+# Prepare label set: top significant up- and downregulated genes
+label_up <- res_df %>%
+  filter(direction == "Up_in_High", padj < padj_cutoff, abs(log2FoldChange) > logfc_cutoff) %>%
+  arrange(padj) %>%
+  head(20)
+
+label_down <- res_df %>%
+  filter(direction == "Down_in_High", padj < padj_cutoff, abs(log2FoldChange) > logfc_cutoff) %>%
+  arrange(padj) %>%
+  head(20)
+
+label_set_all <- bind_rows(label_up, label_down)
+
+# Volcano plot (all DE genes)
+p_volcano_all <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = direction), alpha = 0.6, size = 1.8, na.rm = TRUE) +
+  ggrepel::geom_text_repel(
+    data = label_set_all,
+    aes(label = gene),
+    color = "black",
+    size = 3,
+    max.overlaps = 30,
+    segment.color = "grey60"
+  ) +
+  scale_color_manual(values = c(
+    "Up_in_High" = "red",
+    "Down_in_High" = "blue",
+    "Not_Significant" = "grey70"
+  )) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste("Differential Expression: High vs Low", HMGN1_GENE, "(Hypoxic AML)"),
+    x = "log2(Fold Change)",
+    y = "-log10(adjusted p-value)",
+    color = "Direction"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Save the plot
+ggsave("results_v3/volcano_HMGN1_all_genes_v2.png", p_volcano_all, width = 9, height = 6, dpi = 300)
+
+# --- 9. ONLY LABEL TOP 10 GENES IN VOLCANO PLOT IN HALLMARK HYPOXIA GENESET ---
+res_df <- deg %>%
+  dplyr::mutate(
+    gene = rownames(deg),
+    padj = adj.P.Val,
+    log2FoldChange = logFC,
+    direction = dplyr::case_when(
+      padj < 0.05 & log2FoldChange > 0.5  ~ "Up_in_High",
+      padj < 0.05 & log2FoldChange < -0.5 ~ "Down_in_High",
+      TRUE ~ "Not_Significant"
+    ),
+    hallmark_flag = ifelse(gene %in% hallmark_hypoxia, TRUE, FALSE)
+  )
+
+label_set_up <- res_df %>%
+  dplyr::filter(direction == "Up_in_High", hallmark_flag == TRUE) %>%
+  dplyr::arrange(padj) %>%
+  head(10)
+
+label_set_down <- res_df %>%
+  dplyr::filter(direction == "Down_in_High", hallmark_flag == TRUE) %>%
+  dplyr::arrange(padj) %>%
+  head(10)
+
+label_set <- dplyr::bind_rows(label_set_up, label_set_down)
+
+cat("Labeling", nrow(label_set_up), "Up and", nrow(label_set_down),
+    "Down Hallmark Hypoxia genes (total =", nrow(label_set), ").\n")
+
+# --- Volcano plot (ggplot style) ---
+p_volcano <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  # Base points (non-hallmark)
+  geom_point(data = subset(res_df, !hallmark_flag),
+             aes(color = direction),
+             alpha = 0.4, size = 1.5) +
+  # Label selected hallmark genes
+  ggrepel::geom_text_repel(data = label_set,
+                           aes(label = gene),
+                           color = "black",
+                           size = 3,
+                           max.overlaps = 30,
+                           segment.color = "grey60") +
+  scale_color_manual(values = c(
+    "Up_in_High" = "red",
+    "Down_in_High" = "blue",
+    "Not_Significant" = "grey70"
+  )) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste("Hallmark Hypoxia Genes — High vs Low", HMGN1_GENE, "(Hypoxic AML)"),
+    x = "log2(FC)",
+    y = "-log10(padj)",
+    color = "Direction"
+  ) + theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+ggsave("results_v3/volcano_HMGN1_all_genes_top10.png", p_volcano, width = 9, height = 6, dpi = 300)
+
+# --- 10. SAVE TABLES OF SIGNIFICANT UP/DOWN GENES (ALL DE GENES) ---
+padj_cutoff <- 0.05
+logfc_cutoff <- 0.5
+
+# Significant upregulated genes
+sig_up_all <- res_df %>%
+  filter(direction == "Up_in_High", padj < padj_cutoff, abs(log2FoldChange) > logfc_cutoff) %>%
+  arrange(padj)
+
+write.csv(sig_up_all, file = "tables_v3/sig_up_in_high_all_genes.csv", row.names = FALSE)
+cat("Saved", nrow(sig_up_all), "upregulated genes to tables_v3/sig_up_in_high_all_genes.csv\n")
+
+# Significant downregulated genes
+sig_down_all <- res_df %>%
+  filter(direction == "Down_in_High", padj < padj_cutoff, abs(log2FoldChange) > logfc_cutoff) %>%
+  arrange(padj)
+
+write.csv(sig_down_all, file = "tables_v3/sig_down_in_high_all_genes.csv", row.names = FALSE)
+cat("Saved", nrow(sig_down_all), "downregulated genes to tables_v3/sig_down_in_high_all_genes.csv\n")
+
+print("   -> Volcano plot (all genes) saved to results_v3/volcano_HMGN1_all_genes.png")
+
+# save everything
+saveRDS(deg, "results_v3/deg_results_hmgn1_vs_hypoxia.rds")
+saveRDS(hypoxia_scores, "results_v3/gsva_hypoxia_scores.rds")
+
+save(expr, expr_de, hypoxia_scores, deg, file = "results_v3/final_workspace.RData")
+print("✅ Analysis complete.")
