@@ -120,7 +120,7 @@ write.csv(
 # === 7. Define hypoxic samples ===
 q5 <- quantile(hypoxia_scores_vec, 0.75, na.rm = TRUE)
 hypoxic_samples <- names(hypoxia_scores_vec)[hypoxia_scores_vec >= q5]
-message("Hypoxic samples (top half): ", length(hypoxic_samples))
+message("Hypoxic samples: ", length(hypoxic_samples))
 
 # === 8. Split hypoxic samples by HMGN1 expression (upper vs lower quartiles) ===
 if(!"HMGN1" %in% rownames(expr_vst))
