@@ -1,0 +1,97 @@
+# ==============================================================================
+# Downstream analysis of RNA-seq data
+# ==============================================================================
+
+library(DESeq2)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(RColorBrewer)
+library(enrichplot)
+library(ggplot2)
+library(stringr)
+library(clusterProfiler)
+
+# ==========================================
+# 1. LOAD DATA
+# ==========================================
+counts_data <- read.delim("rsem.merged.gene_counts.tsv", row.names = 1, check.names = FALSE)
+counts_data <- counts_data[, !colnames(counts_data) %in% c("transcript_id(s)")]
+counts_data <- round(counts_data)
+
+# ==========================================
+# 2. CREATE METADATA SETUP
+# ==========================================
+sample_names <- colnames(counts_data)
+
+cell_line <- rep(NA, length(sample_names))
+condition <- rep(NA, length(sample_names))
+
+cell_line[grep("THP-1", sample_names)]    <- "THP1"
+cell_line[grep("Kasumi-1", sample_names)] <- "Kasumi1"
+
+condition[grep("norm", sample_names)]    <- "HMGN1 Ctrl normoxia"
+condition[grep("DOXhyp", sample_names)] <- "HMGN1 KD hypoxia"
+condition[grep("(?<!DOX)hyp", sample_names, perl = TRUE)] <- "HMGN1 Ctrl hypoxia"
+
+group <- paste(cell_line, condition, sep = "_")
+
+col_data <- data.frame(
+  cell_line = factor(cell_line),
+  condition = factor(condition),
+  group = factor(group),
+  row.names = sample_names
+)
+
+# ==========================================
+# 3. RUN DESEQ2 & TRANSFORM DATA
+# ==========================================
+dds <- DESeqDataSetFromMatrix(countData = counts_data, colData = col_data, design = ~ group)
+keep <- rowSums(counts(dds) >= 10) >= 4
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+
+vsd <- vst(dds, blind = FALSE)
+vsd_matrix <- assay(vsd)
+
+# ==========================================
+# 4. TRANSLATE DATASET AT THE SOURCE
+# ==========================================
+clean_ensembl_all <- gsub("\\..*$", "", rownames(dds))
+gene_symbols_all <- mapIds(org.Hs.eg.db, keys = clean_ensembl_all, 
+                           column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+
+final_names <- ifelse(is.na(gene_symbols_all), rownames(dds), gene_symbols_all)
+final_names <- make.unique(final_names)
+
+rownames(dds) <- final_names
+rownames(vsd_matrix) <- final_names
+
+# ==========================================
+# 5. EXTRACT NEW CONTRASTS
+# ==========================================
+group_levels <- levels(dds$group)
+
+thp1_norm   <- group_levels[grep("THP1.*Ctrl.*norm", group_levels)]
+thp1_hyp    <- group_levels[grep("THP1.*Ctrl.*hyp", group_levels)]
+thp1_kd     <- group_levels[grep("THP1.*KD.*hyp", group_levels)]
+
+kasumi_norm <- group_levels[grep("Kasumi1.*Ctrl.*norm", group_levels)]
+kasumi_hyp  <- group_levels[grep("Kasumi1.*Ctrl.*hyp", group_levels)]
+kasumi_kd   <- group_levels[grep("Kasumi1.*KD.*hyp", group_levels)]
+
+res_THP1_hyp_vs_norm     <- results(dds, contrast = c("group", thp1_hyp, thp1_norm))
+res_THP1_kd_vs_ctrl_hyp  <- results(dds, contrast = c("group", thp1_kd, thp1_hyp))
+
+res_Kasumi1_hyp_vs_norm    <- results(dds, contrast = c("group", kasumi_hyp, kasumi_norm))
+res_Kasumi1_kd_vs_ctrl_hyp <- results(dds, contrast = c("group", kasumi_kd, kasumi_hyp))
+
+# ==============================================================================
+# 6: 4 COMPARISONS
+# ==============================================================================
+message("Starting master GSEA execution block...")
+
+run_gsea_analysis(res_THP1_hyp_vs_norm, "THP-1", "Ctrl Hypoxia vs Normoxia", "THP1_Hypoxia_vs_Normoxia")
+run_gsea_analysis(res_THP1_kd_vs_ctrl_hyp, "THP-1", "HMGN1 KD vs Ctrl Hypoxia", "THP1_KD_vs_Ctrl_Hypoxia")
+
+run_gsea_analysis(res_Kasumi1_hyp_vs_norm, "Kasumi-1", "Ctrl Hypoxia vs Normoxia", "Kasumi1_Hypoxia_vs_Normoxia")
+run_gsea_analysis(res_Kasumi1_kd_vs_ctrl_hyp, "Kasumi-1", "HMGN1 KD vs Ctrl Hypoxia", "Kasumi1_KD_vs_Ctrl_Hypoxia")
